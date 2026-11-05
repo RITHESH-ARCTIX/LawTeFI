@@ -1,6 +1,8 @@
 """Retrieve relevant passages from LawTeFI's local legal corpus."""
 
 from __future__ import annotations
+from functools import lru_cache
+
 
 import os
 import re
@@ -21,6 +23,11 @@ STOP_WORDS = {
     "how", "in", "is", "it", "of", "on", "or", "say", "the", "to", "under",
     "what", "which", "who", "with", "bharatiya", "nyaya", "sanhita", "bns",
 }
+
+@lru_cache(maxsize=1)
+def _collection():
+    client = chromadb.PersistentClient(path=str(CHROMA_PATH))
+    return client.get_collection(COLLECTION_NAME)
 
 
 def embed_query(query: str) -> list[float]:
@@ -121,9 +128,7 @@ def get_statute_section(title: str, section_number: str) -> list[dict[str, Any]]
 def list_corpus_sources() -> list[dict[str, Any]]:
     """Group indexed chunks into versioned source-document records for the catalog."""
     try:
-        client = chromadb.PersistentClient(path=str(CHROMA_PATH))
-        collection = client.get_collection(COLLECTION_NAME)
-        metadatas = collection.get(include=["metadatas"]).get("metadatas", [])
+        metadatas = _collection().get(include=["metadatas"]).get("metadatas", [])
     except Exception as exc:
         raise RuntimeError("The shared legal corpus is unavailable.") from exc
 
@@ -170,8 +175,7 @@ def list_corpus_sources() -> list[dict[str, Any]]:
 def retrieve(query: str, limit: int = 5) -> list[dict[str, Any]]:
     """Return the closest source chunks, including their legal citation metadata."""
     try:
-        client = chromadb.PersistentClient(path=str(CHROMA_PATH))
-        collection = client.get_collection(COLLECTION_NAME)
+        collection = _collection()
     except Exception as exc:
         raise RuntimeError(
             f"The legal index was not found at {CHROMA_PATH}. Run the ingestion step first."
@@ -234,6 +238,7 @@ def retrieve(query: str, limit: int = 5) -> list[dict[str, Any]]:
             },
             "source_url": metadata.get("source_url"),
             "distance": distance,
+            "score": score,
         }
         ranked_sources.append((score, source))
         searchable_text = f"{text} {heading} {section_label or ''}".casefold()

@@ -786,7 +786,6 @@ def generate_case_brief(source_groups: dict[str, list[dict[str, Any]]]) -> dict[
         if formatted_sections[field]:
             continue
         fallback_lines: list[str] = []
-        caption_fact_extracted = False
         max_fallbacks = 2 if field in {"holding", "outcome"} else 1
         field_source_ids = [
             source_id for source_id in source_ids_by_field.get(field, []) if source_id in valid_ids
@@ -815,18 +814,7 @@ def generate_case_brief(source_groups: dict[str, list[dict[str, Any]]]) -> dict[
             if not source_text:
                 continue
             if field == "facts":
-                fact_match = re.search(
-                    r"Writ Petition[\s\S]{0,320}?Under Article\s+32 of the Constitution of India\.",
-                    source_text, re.I,
-                )
-                if fact_match:
-                    caption_fact_extracted = True
-                    excerpt = (
-                        "The matter came before the Supreme Court as connected writ petitions under Article 32, "
-                        "including Writ Petition (Criminal) No. 167 of 2012."
-                    )
-                else:
-                    excerpt = source_text[:260]
+                excerpt = source_text[:260]
             elif field == "issues":
                 issue_match = re.search(
                     r"According to them, first and foremost Section\s*66A[^.]{0,320}?Article\s*19\(2\)\.",
@@ -859,38 +847,20 @@ def generate_case_brief(source_groups: dict[str, list[dict[str, Any]]]) -> dict[
             excerpt_limit = 1000 if field == "holding" else 560
             if len(excerpt) > excerpt_limit:
                 excerpt = excerpt[:excerpt_limit].rstrip() + "…"
-            if field != "outcome" and not (field == "facts" and caption_fact_extracted) and len(source_text) > len(excerpt):
+            if field != "outcome" and len(source_text) > len(excerpt):
                 sentence_end = max(excerpt.rfind(". "), excerpt.rfind("? "), excerpt.rfind("! "))
                 excerpt = excerpt[: sentence_end + 1] if sentence_end >= 160 else excerpt.rstrip() + "…"
             if excerpt and excerpt[-1] not in ".?!\"”)]":
                 excerpt = excerpt.rstrip("… ") + "…"
-            if field == "facts" and fact_match:
-                fallback_lines.append(f"Procedural background from the judgment caption: {excerpt} [{source_id}]")
-            else:
-                fallback_lines.append(f'Retrieved evidence excerpt (OCR-normalized; not an AI summary): “{excerpt}” [{source_id}]')
+            fallback_lines.append(f'Retrieved evidence excerpt (OCR-normalized; not an AI summary): “{excerpt}” [{source_id}]')
             if source_id not in used_ids:
                 used_ids.append(source_id)
             if len(fallback_lines) >= max_fallbacks:
                 break
         if fallback_lines:
             formatted_sections[field] = fallback_lines
-            if field != "facts" or not caption_fact_extracted:
-                if field not in missing:
-                    missing.append(field)
-
-    # The docket is the reliable procedural background in this report format;
-    # do not let the language model invent ordinary facts for a writ batch.
-    for source_id in source_ids_by_field.get("facts", []):
-        if source_id not in valid_ids:
-            continue
-        docket_text = _clean_report_ocr(source_text_by_id.get(source_id, ""))
-        if re.search(r"Writ Petition[\s\S]{0,320}?Under Article\s+32 of the Constitution of India", docket_text, re.I):
-            formatted_sections["facts"] = [
-                f"The matter came before the Supreme Court as connected writ petitions under Article 32, including Writ Petition (Criminal) No. 167 of 2012. [{source_id}]"
-            ]
-            missing = [field for field in missing if field != "facts"]
-            break
-    
+            if field not in missing:
+                missing.append(field)
 
     # Prefer the court's own enumerated concluding order when the judgment
     # supplies one; this prevents the model from omitting a disposition.

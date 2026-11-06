@@ -1,7 +1,8 @@
+
 import re
 from typing import Any, Literal
 from uuid import UUID
-
+from .cross_reference import CONCORDANCE_MAP, parse_cross_reference_query, router as cross_reference_router
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -17,6 +18,7 @@ from .retrieval import get_statute_section, list_corpus_sources, retrieve
 app = FastAPI(title="LawTeFI API", version="0.1.0")
 app.include_router(auth_router)
 app.include_router(documents_router)
+app.include_router(cross_reference_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -280,6 +282,14 @@ def chat(
                 main_section = sources[0].get("section")
                 if main_section:
                     sources = [source for source in sources if source.get("section") == main_section]
+            # Bridge historical IPC / CrPC / IEA queries to operative BNS / BNSS / BSA passages
+            if not sources:
+                concordance_key = parse_cross_reference_query(request.question)
+                if concordance_key and concordance_key in CONCORDANCE_MAP:
+                    mapping = CONCORDANCE_MAP[concordance_key]
+                    matched_sources = retrieve(mapping["search_query"], limit=3)
+                    if matched_sources:
+                        sources = matched_sources
             result = generate_grounded_answer(request.question, sources)
     except RuntimeError as exc:
         from fastapi import HTTPException

@@ -19,6 +19,32 @@ type Citation = {
   excerpt?: string | null;
 };
 
+type ConcordanceInfo = {
+  old_act: string;
+  old_section: string;
+  old_title: string;
+  new_act: string;
+  new_section: string;
+  new_title: string;
+  substantive_changes: string[];
+  search_query: string;
+};
+
+type ConcordanceEvidence = {
+  title: string;
+  section?: string | null;
+  heading?: string | null;
+  pages?: { start?: number | null; end?: number | null };
+  excerpt: string;
+};
+
+type CrossReferenceResult = {
+  status: string;
+  query: string;
+  concordance: ConcordanceInfo;
+  grounded_evidence: ConcordanceEvidence[];
+};
+
 type Message = {
   role: "assistant" | "user";
   content: string;
@@ -26,6 +52,7 @@ type Message = {
   citations?: Citation[];
   note?: string;
   pending?: boolean;
+  crossReference?: CrossReferenceResult | null;
 };
 
 type Conversation = { id: string; title: string; updated_at: string; document_id?: string | null; document_title?: string | null };
@@ -36,6 +63,7 @@ type CorpusSource = { title: string; document_type: string; jurisdiction: string
 type PassageResult = { id: string; title: string; section?: string | null; paragraph?: string | null; pages?: { start?: number | null; end?: number | null }; text: string };
 type PassageSearchResponse = { query: string; results: PassageResult[]; message: string };
 type BriefResult = { status: string; brief: string | null; citations: Citation[]; saved_work_id: string | null; message: string };
+
 type ChatResult = {
   status: string;
   answer: string | null;
@@ -116,7 +144,7 @@ function exportSavedWorkMarkdown(title: string, content: string, citations: Cita
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = `${title.trim().replace(/[<>:\"/\\|?*\u0000-\u001f]/g, "-").replace(/\s+/g, "-").slice(0, 100) || "lawtefi-research"}.md`;
+  anchor.download = `${title.trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-").replace(/\s+/g, "-").slice(0, 100) || "lawtefi-research"}.md`;
   anchor.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
@@ -196,6 +224,7 @@ export default function Home() {
       content: message.content,
       status: message.status,
       citations: message.citations ?? [],
+      crossReference: null,
     })));
     setNotice("");
   }
@@ -448,8 +477,6 @@ export default function Home() {
         setAuthLoading(false);
       }
     })();
-    // Session restoration intentionally runs once on page load.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function submitAuth(event: FormEvent<HTMLFormElement>) {
@@ -517,10 +544,15 @@ export default function Home() {
     setPrompt("");
     setNotice("");
     try {
-      const result = await apiRequest<ChatResult>("/api/v1/chat", token, {
-        method: "POST",
-        body: JSON.stringify({ question, conversation_id: conversationId, document_id: activeDocumentId }),
-      });
+      const [result, crossRef] = await Promise.all([
+        apiRequest<ChatResult>("/api/v1/chat", token, {
+          method: "POST",
+          body: JSON.stringify({ question, conversation_id: conversationId, document_id: activeDocumentId }),
+        }),
+        apiRequest<CrossReferenceResult>(`/api/v1/cross-reference?query=${encodeURIComponent(question)}`, token)
+          .catch(() => null),
+      ]);
+
       setConversationId(result.conversation_id);
       setMessages((current) => {
         const updated = [...current];
@@ -532,6 +564,7 @@ export default function Home() {
             status: result.status,
             citations: result.citations ?? [],
             note: result.answer ? result.message : undefined,
+            crossReference: crossRef && crossRef.status === "ok" ? crossRef : null,
           };
         }
         return updated;
@@ -713,7 +746,7 @@ export default function Home() {
                         setPassageSearchResults([]);
                         setPassageSearchNotice("");
                       }}>{passageSearchDocumentId === item.id ? "Close passage search" : "Search passages"}</button>
-                      <button type="button" onClick={() => void generateBrief(item)} disabled={documentBusy}>Case brief (incomplete)</button>
+                      <button type="button" onClick={() => void generateBrief(item)} disabled={documentBusy}>Case brief</button>
                       <button type="button" className="document-delete" onClick={() => void removeDocument(item)} disabled={documentBusy}>Delete</button>
                     </div>
                     {passageSearchDocumentId === item.id && <div className="passage-search-panel">
@@ -794,6 +827,64 @@ export default function Home() {
                   <div className="message-avatar">{message.role === "user" ? user.display_name.slice(0, 1).toUpperCase() : "§"}</div>
                   <div className="message-body">
                     <p className="message-label">{message.role === "user" ? "You" : message.pending ? "LawTeFI · Searching" : message.status === "evidence_only" ? "LawTeFI · Statutory source text" : message.citations?.length ? "LawTeFI · Source-grounded draft" : "LawTeFI"}</p>
+                    
+                    {message.crossReference && (
+                      <div style={{
+                        margin: "12px 0 16px 0",
+                        padding: "16px",
+                        borderRadius: "8px",
+                        border: "1px solid #d1d5db",
+                        backgroundColor: "#f9fafb",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "12px"
+                      }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid #e5e7eb", paddingBottom: "8px" }}>
+                          <span style={{ fontSize: "11px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", color: "#4b5563" }}>
+                            Statutory Concordance & Transitional Mapping
+                          </span>
+                          <span style={{ fontSize: "12px", color: "#059669", fontWeight: 600 }}>Active Operative Law</span>
+                        </div>
+
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+                          <div style={{ background: "#ffffff", padding: "12px", borderRadius: "6px", border: "1px solid #e5e7eb" }}>
+                            <p style={{ margin: 0, fontSize: "11px", color: "#6b7280", textTransform: "uppercase", fontWeight: 600 }}>Repealed Provision</p>
+                            <p style={{ margin: "4px 0 2px 0", fontWeight: 700, fontSize: "15px", color: "#b91c1c" }}>
+                              {message.crossReference.concordance.old_section}
+                            </p>
+                            <p style={{ margin: 0, fontSize: "12px", color: "#374151" }}>{message.crossReference.concordance.old_act}</p>
+                            <p style={{ margin: "4px 0 0 0", fontSize: "13px", fontWeight: 500, color: "#111827" }}>{message.crossReference.concordance.old_title}</p>
+                          </div>
+
+                          <div style={{ background: "#ffffff", padding: "12px", borderRadius: "6px", border: "1px solid #a7f3d0" }}>
+                            <p style={{ margin: 0, fontSize: "11px", color: "#047857", textTransform: "uppercase", fontWeight: 600 }}>Operative Provision</p>
+                            <p style={{ margin: "4px 0 2px 0", fontWeight: 700, fontSize: "15px", color: "#047857" }}>
+                              {message.crossReference.concordance.new_section}
+                            </p>
+                            <p style={{ margin: 0, fontSize: "12px", color: "#374151" }}>{message.crossReference.concordance.new_act}</p>
+                            <p style={{ margin: "4px 0 0 0", fontSize: "13px", fontWeight: 500, color: "#111827" }}>{message.crossReference.concordance.new_title}</p>
+                          </div>
+                        </div>
+
+                        {message.crossReference.concordance.substantive_changes?.length > 0 && (
+                          <div style={{ background: "#ffffff", padding: "12px", borderRadius: "6px", border: "1px solid #e5e7eb" }}>
+                            <p style={{ margin: "0 0 6px 0", fontSize: "12px", fontWeight: 700, color: "#1f2937" }}>Substantive Legislative Changes:</p>
+                            <ul style={{ margin: 0, paddingLeft: "18px", fontSize: "13px", color: "#374151", display: "flex", flexDirection: "column", gap: "4px" }}>
+                              {message.crossReference.concordance.substantive_changes.map((change, idx) => (
+                                <li key={idx}>{change}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {message.crossReference.grounded_evidence?.length > 0 && (
+                          <div style={{ fontSize: "12px", color: "#4b5563" }}>
+                            <strong>Gazette Source:</strong> {message.crossReference.grounded_evidence[0].title} ({message.crossReference.grounded_evidence[0].section}, p. {message.crossReference.grounded_evidence[0].pages?.start ?? "N/A"})
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     <p className="message-content">{message.content}</p>
                     {message.note && <p className="message-note">{message.note}</p>}
                     {message.role === "assistant" && !message.pending && message.citations?.length && previousQuestion && (

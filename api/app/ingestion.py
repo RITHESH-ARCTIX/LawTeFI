@@ -38,6 +38,44 @@ SECTION_RE = re.compile(
 JUDGMENT_PARA_RE = re.compile(r"^\s*[^\d]{0,12}(\d{1,3})\s*\)?[.)]\s+\S")
 NUMBERED_SECTION_RE = re.compile(r"^(\d+[A-Z]?(?:\.\d+)*\s*[.)])\s+(.+)$", re.I)
 
+# Official Acts and the Constitution print every heading as
+# "14. Equality before law.—The State shall not deny ...". In the PDF text layer a
+# heading is often in the MIDDLE of a text block, may carry an amendment marker
+# ("2[21A. Right to education.—..."), and may wrap over two lines. So headings are
+# searched for anywhere in the text instead of only at the start of a block.
+# Match section numbers followed either by:
+# 1) A title and dash: "14. Equality before law.—" or "2[21A. Right to education.—"
+# 2) A subsection parenthetical directly: "14. (1)" or "14. (a)"
+# 3) A title followed by a period/colon and subsection: "14. Short title. (1)"
+# Match section numbers followed by either:
+# Matches:
+# Universal section heading matcher for Indian statutes & Constitution:
+# Matches:
+# 1) "14. Equality before law.—" or "104. Penalty for sitting and voting..."
+# 2) "14. (1)" or "1. (a)"
+# 3) Headings with amendment markers: "2[21A. Right to education.—"
+HEADING_INLINE_RE = re.compile(
+    r"(?:(?<=\s)|^)(?:\d{1,2}\[)?(?P<number>\d{1,3}[A-Z]{0,2})\.\s+"
+    r"(?:"
+    r"(?=\(\d+[a-z]?\)|\([a-z]\))|"                                              # Direct (1) or (a)
+    r"(?P<title>[A-Z][^\n\r]{1,160}?)(?:\.[\s—–]|\s?[—–]|\.-|\.\s+|$)"          # Title
+    r")"
+)
+FOOTNOTE_IGNORE_RE = re.compile(
+    r"^(?:Ins\b|Subs\b|Omitted\b|See\b|W\.e\.f\b|1st\b|2nd\b|3rd\b|\d+th\b|Act\s*[,(0-9]|Vide\b)",
+    re.I,
+)
+
+# Schedules and appendices contain numbered paragraphs that look like headings.
+BACK_MATTER_RE = re.compile(
+    r"^(?:THE\s+)?(?P<name>(?:(?:FIRST|SECOND|THIRD|FOURTH|FIFTH|SIXTH|SEVENTH|EIGHTH|NINTH|TENTH|"
+    r"ELEVENTH|TWELFTH)\s+)?SCHEDULE|APPENDIX\s+[IVXLC0-9]+)\b"
+)
+EXPLICIT_UNIT_RE = re.compile(
+    r"^(?:(?:Section|SECTION|Sec\.?|SEC\.?|Article|ARTICLE)\s+\d+|(?:PART|CHAPTER|Part|Chapter)\s+[IVXLCDM0-9]+)"
+)
+CONTEXT_HEADING_RE = re.compile(r"^(?:PART|CHAPTER|Part|Chapter)\s+[IVXLCDM0-9]+")
+
 
 def is_legal_heading(first_line: str) -> bool:
     if re.match(r"^(?:section|sec\.?|article)\s+\d+|^(?:PART|CHAPTER)\s+[IVXLCDM0-9]+", first_line, re.I):
@@ -46,14 +84,18 @@ def is_legal_heading(first_line: str) -> bool:
     if not match:
         return False
     title = match.group(2).strip()
-    # Avoid treating amendment footnotes such as "1. 1st day of July..." as section 1.
     if re.match(r"\d+(?:st|nd|rd|th)\b", title, re.I):
         return False
     return len(title) <= 400
 
 
+def is_explicit_unit(first_line: str, allow_plain_numbered: bool) -> bool:
+    if EXPLICIT_UNIT_RE.match(first_line):
+        return True
+    return allow_plain_numbered and bool(SECTION_RE.match(first_line)) and is_legal_heading(first_line)
+
+
 def legal_heading_labels(first_line: str) -> tuple[str, str]:
-    """Return a concise citation anchor and a readable heading for statute text."""
     numbered = NUMBERED_SECTION_RE.match(first_line)
     if numbered:
         section_number = numbered.group(1).rstrip(".)- ")
@@ -70,6 +112,49 @@ def legal_heading_labels(first_line: str) -> tuple[str, str]:
     return label, first_line[:220]
 
 
+def back_matter_label(match: re.Match[str]) -> str:
+    name = " ".join(match.group("name").split())
+    if name.startswith("APPENDIX"):
+        return "Appendix " + name.split()[-1]
+    return name.title()
+
+
+def split_at_headings(text: str) -> list[tuple[str, str | None, str | None]]:
+    """Split block text at numbered headings found anywhere inside it."""
+    matches = list(HEADING_INLINE_RE.finditer(text))
+    if not matches:
+        return [(text, None, None)]
+
+    valid_matches = []
+    for m in matches:
+        num = m.group("number")
+        title = (m.group("title") or "").strip()
+        # Ignore actual amendment footnotes
+        if FOOTNOTE_IGNORE_RE.match(title):
+            continue
+        try:
+            num_int = int(re.sub(r"[A-Z]", "", num))
+            if num_int > 550 or num_int == 0:
+                continue
+        except ValueError:
+            pass
+        valid_matches.append(m)
+
+    if not valid_matches:
+        return [(text, None, None)]
+
+    segments: list[tuple[str, str | None, str | None]] = []
+    lead = text[: valid_matches[0].start()].strip()
+    if lead:
+        segments.append((lead, None, None))
+    for index, match in enumerate(valid_matches):
+        end = valid_matches[index + 1].start() if index + 1 < len(valid_matches) else len(text)
+        segment = text[match.start():end].strip()
+        number = match.group("number")
+        title = (match.group("title") or "").strip()
+        segments.append((segment, number, title or None))
+    return segments
+
 @dataclass
 class TextBlock:
     text: str
@@ -77,6 +162,7 @@ class TextBlock:
     section_label: str | None = None
     paragraph_number: str | None = None
     heading: str | None = None
+    begins_unit: bool = False  # True where a new article/section/schedule starts
 
 
 @dataclass
@@ -91,11 +177,186 @@ class LegalChunk:
 
 def normalize_text(text: str) -> str:
     text = text.replace("\u00ad", "").replace("\u00a0", " ").replace("\ufeff", "")
-    # Join words split by line-end hyphenation, but preserve the remaining line breaks.
+    # Join words split by line-end hyphenation, but preserve remaining line breaks.
     text = re.sub(r"(?<=\w)-\n(?=\w)", "", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def label_blocks(
+    raw_blocks: list[tuple[str, int | None]], document_type: str, allow_plain_numbered: bool
+) -> list[TextBlock]:
+    """Attach article/section/paragraph labels to extracted text blocks."""
+    blocks: list[TextBlock] = []
+    current_section: str | None = None
+    current_heading: str | None = None
+    legal_text = document_type in {"statute", "constitution"}
+    in_back_matter = False
+    pending_context: list[str] = []
+
+    for text, page in raw_blocks:
+        if legal_text:
+            first_line = text.splitlines()[0].strip()
+            back_matter = BACK_MATTER_RE.match(first_line)
+            if back_matter:
+                in_back_matter = True
+                current_section = back_matter_label(back_matter)
+                current_heading = first_line[:220]
+                blocks.append(
+                    TextBlock(
+                        text=text,
+                        page=page,
+                        section_label=current_section,
+                        heading=current_heading,
+                        begins_unit=True,
+                    )
+                )
+                continue
+            if in_back_matter:
+                blocks.append(
+                    TextBlock(
+                        text=text,
+                        page=page,
+                        section_label=current_section,
+                        heading=current_heading,
+                    )
+                )
+                continue
+
+            segments_with_headings = split_at_headings(text)
+            has_split_heading = any(num is not None for _, num, _ in segments_with_headings)
+
+            if has_split_heading:
+                for segment, number, title in segments_with_headings:
+                    if number:
+                        kind = "Article" if document_type == "constitution" else "Section"
+                        current_section = f"{kind} {number}"
+                        if title:
+                            clean_title = " ".join(str(title).split()).rstrip(" .—–-")
+                            current_heading = f"{number}. {clean_title}."[:220]
+                        else:
+                            current_heading = f"{kind} {number}"
+
+                        if pending_context:
+                            segment = "\n".join(pending_context) + "\n\n" + segment
+                            pending_context = []
+                        blocks.append(
+                            TextBlock(
+                                text=segment,
+                                page=page,
+                                section_label=current_section,
+                                heading=current_heading,
+                                begins_unit=True,
+                            )
+                        )
+                    else:
+                        blocks.append(
+                            TextBlock(
+                                text=segment,
+                                page=page,
+                                section_label=current_section,
+                                heading=current_heading,
+                            )
+                        )
+                continue
+
+            # Fallback: check if the block begins with a numbered section: e.g. "14. ..." or "104. ..."
+            num_match = re.match(r"^(?:(?:\d{1,2}\[)?(?P<num>\d{1,3}[A-Z]{0,2}))\.\s+(?P<rest>.+)$", first_line)
+            if num_match and not FOOTNOTE_IGNORE_RE.match(num_match.group("rest").strip()):
+                num_str = num_match.group("num")
+                try:
+                    num_val = int(re.sub(r"[A-Z]", "", num_str))
+                    if 0 < num_val <= 550:
+                        kind = "Article" if document_type == "constitution" else "Section"
+                        current_section = f"{kind} {num_str}"
+                        clean_title = num_match.group("rest").split("—")[0].split(".")[0].strip()
+                        current_heading = f"{num_str}. {clean_title}."[:220]
+                        if pending_context:
+                            text = "\n".join(pending_context) + "\n\n" + text
+                            pending_context = []
+                        blocks.append(
+                            TextBlock(
+                                text=text,
+                                page=page,
+                                section_label=current_section,
+                                heading=current_heading,
+                                begins_unit=True,
+                            )
+                        )
+                        continue
+                except ValueError:
+                    pass
+
+            if CONTEXT_HEADING_RE.match(first_line):
+                pending_context.append(" ".join(text.split()))
+                continue
+
+            if is_explicit_unit(first_line, allow_plain_numbered):
+                section_label, heading = legal_heading_labels(first_line)
+                if document_type == "constitution" and section_label.startswith("Section "):
+                    section_label = section_label.replace("Section ", "Article ", 1)
+                current_section, current_heading = section_label, heading
+                if pending_context:
+                    text = "\n".join(pending_context) + "\n\n" + text
+                    pending_context = []
+                blocks.append(
+                    TextBlock(
+                        text=text,
+                        page=page,
+                        section_label=current_section,
+                        heading=current_heading,
+                        begins_unit=True,
+                    )
+                )
+                continue
+
+            blocks.append(
+                TextBlock(
+                    text=text,
+                    page=page,
+                    section_label=current_section,
+                    heading=current_heading,
+                )
+            )
+            continue
+
+        # Judgments and other document types
+        first_line = text.splitlines()[0].strip()
+        section_label = None
+        paragraph_number = None
+        heading = None
+        if document_type == "judgment":
+            para_match = JUDGMENT_PARA_RE.match(first_line)
+            if para_match:
+                paragraph_number = para_match.group(1)
+                section_label = current_section
+                heading = current_heading
+            elif SECTION_RE.match(first_line) and is_legal_heading(first_line):
+                section_label, heading = legal_heading_labels(first_line)
+                current_heading = heading
+                current_section = section_label
+            else:
+                section_label = current_section
+                heading = current_heading
+        elif SECTION_RE.match(first_line) and is_legal_heading(first_line):
+            section_label, heading = legal_heading_labels(first_line)
+            current_heading = heading
+            current_section = section_label
+        else:
+            section_label = current_section
+            heading = current_heading
+
+        blocks.append(
+            TextBlock(
+                text=text,
+                page=page,
+                section_label=section_label,
+                paragraph_number=paragraph_number,
+                heading=heading,
+            )
+        )
+    return blocks
 
 
 def extract_blocks(path: Path, document_type: str) -> list[TextBlock]:
@@ -158,48 +419,7 @@ def extract_blocks(path: Path, document_type: str) -> list[TextBlock]:
                 if block:
                     raw_blocks.append((block, page_number if "\f" in text else None))
 
-    blocks: list[TextBlock] = []
-    current_section: str | None = None
-    current_heading: str | None = None
-    for text, page in raw_blocks:
-        first_line = text.splitlines()[0].strip()
-        section_label = None
-        paragraph_number = None
-        heading = None
-
-        if document_type == "judgment":
-            para_match = JUDGMENT_PARA_RE.match(first_line)
-            if para_match:
-                paragraph_number = para_match.group(1)
-                section_label = current_section
-                heading = current_heading
-            elif SECTION_RE.match(first_line) and is_legal_heading(first_line):
-                section_label, heading = legal_heading_labels(first_line)
-                current_heading = heading
-                current_section = section_label
-            else:
-                section_label = current_section
-                heading = current_heading
-        elif SECTION_RE.match(first_line) and is_legal_heading(first_line):
-            section_label, heading = legal_heading_labels(first_line)
-            if document_type == "constitution" and section_label.startswith("Section "):
-                section_label = section_label.replace("Section ", "Article ", 1)
-            current_heading = heading
-            current_section = section_label
-        else:
-            section_label = current_section
-            heading = current_heading
-
-        blocks.append(
-            TextBlock(
-                text=text,
-                page=page,
-                section_label=section_label,
-                paragraph_number=paragraph_number,
-                heading=heading,
-            )
-        )
-    return blocks
+    return label_blocks(raw_blocks, document_type, allow_plain_numbered=path.suffix.lower() != ".pdf")
 
 
 def split_oversized(text: str, limit: int = MAX_CHARS) -> list[str]:
@@ -237,7 +457,11 @@ def chunk_blocks(blocks: list[TextBlock]) -> list[LegalChunk]:
             return
         text = "\n\n".join(item.text for item in current).strip()
         page_numbers = [item.page for item in current if item.page is not None]
-        anchor = next((item for item in reversed(current) if item.section_label or item.paragraph_number), current[-1])
+        # A chunk that starts a new article/section/schedule is labelled by that
+        # heading. Judgment chunks keep the original "last labelled block" anchor.
+        anchor = next((item for item in current if item.begins_unit), None) or next(
+            (item for item in reversed(current) if item.section_label or item.paragraph_number), current[-1]
+        )
         for piece in split_oversized(text):
             chunks.append(
                 LegalChunk(
@@ -254,9 +478,16 @@ def chunk_blocks(blocks: list[TextBlock]) -> list[LegalChunk]:
 
     for block in blocks:
         # Start a fresh chunk when a new explicit legal unit begins.
-        begins_unit = bool(block.paragraph_number or (block.section_label and block.text.startswith(block.section_label)))
-        if current and (begins_unit or current_chars + len(block.text) + 2 > MAX_CHARS):
+        starts_new_unit = bool(
+            block.begins_unit
+            or block.paragraph_number
+            or (block.section_label and block.text.startswith(block.section_label))
+        )
+        if current and starts_new_unit:
             flush()
+        elif current and (current_chars + len(block.text) + 2 > MAX_CHARS):
+            flush()
+
         if len(block.text) > MAX_CHARS:
             flush()
             current = [block]
@@ -354,8 +585,10 @@ def ingest_record(
         metadatas.append(metadata)
         ids.append(f"{document_key}-{index}")
 
-    # Upsert makes repeating the same manifest/file pair safe and keeps older file
-    # versions as separate records because the source hash is part of the ID.
+    # Re-ingesting the same file replaces its earlier chunks, so a change in the
+    # chunking rules cannot leave stale chunks behind. Other file versions keep
+    # their own records because the source hash is part of document_id.
+    collection.delete(where={"document_id": document_key})
     for start in range(0, len(chunks), CHROMA_WRITE_BATCH_SIZE):
         end = start + CHROMA_WRITE_BATCH_SIZE
         collection.upsert(
@@ -365,6 +598,22 @@ def ingest_record(
             metadatas=metadatas[start:end],
         )
     return len(chunks)
+
+
+def print_chunk_report(chunks: list[LegalChunk], find: list[str] | None) -> None:
+    labelled = [chunk for chunk in chunks if chunk.section_label]
+    print(
+        f"  labelled chunks: {len(labelled)}/{len(chunks)}; "
+        f"distinct labels: {len({chunk.section_label for chunk in labelled})}"
+    )
+    for number in find or []:
+        wanted = {f"Article {number}", f"Section {number}"}
+        hits = [chunk for chunk in chunks if chunk.section_label in wanted]
+        if not hits:
+            print(f"  [find {number}] no chunk is labelled Article/Section {number}")
+        for chunk in hits[:3]:
+            snippet = " ".join(chunk.text.split())[:110]
+            print(f"  [find {number}] {chunk.section_label} p.{chunk.page_start}: {snippet}")
 
 
 def main() -> int:
@@ -377,6 +626,7 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--dry-run", action="store_true", help="Extract and chunk only; do not embed or write to PostgreSQL.")
     parser.add_argument("--only", nargs="+", help="Process only these manifest filenames (useful for reviewing one source at a time).")
+    parser.add_argument("--find", nargs="+", help="Print the chunks labelled Article/Section N for each given N (e.g. --find 14 21 226).")
     parser.add_argument("--embedding-model", default=os.environ.get("OLLAMA_EMBED_MODEL", "embeddinggemma"))
     parser.add_argument("--ollama-url", default=os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434"))
     parser.add_argument("--chroma-path", type=Path, default=Path(os.environ.get("CHROMA_PATH", str(DEFAULT_CHROMA_PATH))))
@@ -405,6 +655,7 @@ def main() -> int:
                 anchor = chunk.section_label or (f"para. {chunk.paragraph_number}" if chunk.paragraph_number else "unlabeled")
                 page = f", p. {chunk.page_start}" if chunk.page_start else ""
                 print(f"  - {anchor}{page}: {chunk.text[:180].replace(chr(10), ' ')}")
+            print_chunk_report(chunks, args.find)
 
         if args.dry_run:
             print("Dry run complete. Nothing was embedded or written to the database.")

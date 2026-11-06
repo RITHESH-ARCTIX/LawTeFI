@@ -1,53 +1,32 @@
-# ==============================
-# Environment variables & secrets
-# ==============================
-.env
-.env.*
-!.env.example
-api/.env
-web/.env
-web/.env.local
-
-# ==============================
-# Python
-# ==============================
-__pycache__/
-*.py[cod]
-*.pyo
+﻿# Virtual Environments
 .venv/
 venv/
 env/
+__pycache__/
+*.pyc
 
-# ==============================
-# Node.js / Next.js
-# ==============================
-node_modules/
-.next/
-out/
-dist/
-build/
-.turbo/
+# Next.js build and dependencies
+web/node_modules/
+web/.next/
+web/out/
+web/.env.local
+web/.env*.local
 
-# ==============================
-# AI models and caches
-# ==============================
-.cache/
-models/
+# Data, Vector Stores & Private PDFs
 data/chroma/
 data/private_documents/
+data/source_docs/*.pdf
+*.sqlite3
+*.bin
+*.pickle
 
-# ==============================
-# Downloaded installers and tools
-# ==============================
-downloads/
+# Tools & Local Environment
 tools/
-
-# ==============================
-# Logs and temporary files
-# ==============================
-*.log
-*.tmp
-.DS_Store
-Thumbs.db
+.env
+eval_results_*.csv
+.vscode/
+.cache/
 database/postgres-data/
-
+downloads/
+models/
+project_source.zip
